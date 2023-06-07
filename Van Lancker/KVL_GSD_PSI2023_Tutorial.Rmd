@@ -1,0 +1,848 @@
+---
+title: "Covariate Adjustment and Group Sequential, Information Adaptive Designs"
+author: Kelly Van Lancker (kelly.vanlancker@ugent.be), Josh Betz (jbetz@jhu.edu),
+  and Michael Rosenblum (mrosen@jhu.edu)
+date: "`r format(Sys.time(), '%Y-%m-%d %I:%M')`"
+output:
+  html_document:
+    toc: yes
+    theme: united
+    highlight: tango
+  pdf_document:
+    toc: yes
+subtitle: Worked Examples using Resampled Data from MISTIE III Trial
+---
+
+
+```{r Report_Setup, echo = FALSE, message = FALSE}
+## Create Paths
+mistie3_results_paper_link <-
+  "https://www.thelancet.com/article/S0140-6736(19)30195-3/fulltext"
+our_paper_link <-
+  "https://arxiv.org/abs/2201.12921"
+### Graphics and Report Options ################################################
+table_digits <-
+  1 # Significant Figures for Mean/SD, N (%), Median/IQR
+### Set Default Options ########################################################
+options(knitr.kable.NA = "")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "markup"
+) 
+```
+Note: This tutorial uses materials from [our paper on combining covariate adjustment with group sequential, information adaptive designs](`r our_paper_link`).
+
+## Using This Tutorial
+
+This tutorial contains an example dataset as well as code to illustrate how to perform covariate adjustment in group sequential, information adaptive designs in practice using [R](https://www.r-project.org/). R is a free and open source language and statistical computing environment. [Rstudio](https://rstudio.com/) is a powerful development environment for using the R language. The ability of R can be extended by downloading software packages from the [Comprehensive R Archival Network (CRAN)](https://cran.r-project.org/). In R, these packages can be installed from the Comprehensive R Archival Network, or CRAN, using the `install.packages()` command. In Rstudio IDE, there is a 'Packages' tab that allows users to see which packages are installed, which packages are currently in use, and install or update packages using a graphical interface. Once the required packages are installed, data can be downloaded from Github, and users can run the code on their own devices.
+
+
+## Combining Covariate Adjustment with Group Sequential and Information Adaptive Designs in Practice
+
+### Installing and Loading R Packages
+
+The following packages and their dependencies need to be installed:
+
+  - [devtools](https://cran.r-project.org/web/packages/devtools/index.html) - Collection of tools to make developing R packages easier
+  - [table1](https://cran.r-project.org/web/packages/table1/index.html) - Creating simple tabulations in aggregate and by treatment arm
+  - [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html) - An ecosystem of packages for working with data
+  - [rpact](https://cran.r-project.org/web/packages/rpact/index.html) - Provides adjusted boundaries and defines a group sequential design
+  - [simul](https://github.com/nt-williams/simul#readme) - Computing fast critical values for constructing uniform (simultaneous) confidence bands
+  - [GSDCovAdj](https://github.com/kelvlanc/GSDCovAdj) - Combining group sequential, information-adaptive designs with covariate adjustment
+  
+```{r install-packages, eval = FALSE, message = FALSE}
+required_packages <-
+  c("devtools", "table1", "tidyverse", "rpact")
+
+install.packages(required_packages)
+
+devtools::install_github("nt-williams/simul")
+devtools::install_github("kelvlanc/GSDCovAdj")
+```  
+
+Once the required packages are installed, they can be loaded using `library()`
+
+```{r load-packages, warning = FALSE}
+library(devtools)
+library(table1)
+library(tidyverse)
+library(rpact)
+library(simul)
+library(GSDCovAdj)
+```
+
+## MISTIE III Study Design
+
+Data used in this example are simulated using data based on the **M**inimally **I**nvasive **S**urgery with **T**hrombolysis in **I**ntracerebral haemorrhage **E**vacuation trial ([MISTIE III](https://doi.org/10.1016/s0140-6736(19)30195-3): [NCT01827046](https://clinicaltrials.gov/show/NCT01827046)). MISTIE III was an open-label, blinded endpoint, Phase III clinical trial of minimally invasive surgery with thrombolysis in intracerebral haemorrhage evacuation. The goal was to assess whether minimally invasive catheter evacuation followed by thrombolysis, with the aim of decreasing clot size to 15 mL or less, would improve functional outcome in patients with intracerebral haemorrhage (a severe form of stroke). To this end, participants were randomized 1:1 to standard-of-care medical management, or minimal invasive surgery with Alteplase for ICH removal. Outcomes were measured at 30, 180, and 365-days post-randomization using the Modified Rankin Scale (mRS). The primary outcome was defined as having a mRS score of 0-3 measured 365 days from enrollment  (defined as a *success*). Survival was also assessed, with patients administratively censored on the date of their final MRS assessment.
+Though the trial used covariate adaptive randomization, we ignore that in our discussion below, for simplicity (since analogous computations taking this into account give similar results), and we use simple randomization.
+
+
+### Creating Simulated Data:
+
+The data in this template are simulated data, generated from probability models fit to the original study data, and *not the actual data from the MISTIE III trial.* A new dataset was created by resampling with replacement from the original data, and then each variable in the new dataset was iteratively replaced using simulated values from probability models based on the original data.
+
+--------------------------------------------------------------------------------
+
+## Simulated MISTIE III Data
+A new synthetic dataset was created by resampling baseline covariates from the original data with replacement. The columns in the synthetic dataset were sequentially replaced using simulated values based on predictions from a sequence of regression models based on the actual study data.
+
+### Load MISTIE III Data
+The data can be loaded directly from Github:
+
+```{r sim_miii-data, echo = TRUE}
+data_url <-
+  "https://github.com/jbetz-jhu/CovariateAdjustmentTutorial/raw/main/Simulated_MISTIE_III_v1.2.csv"
+
+sim_miii <-
+  read.csv(file = url(data_url))
+
+# Read in data: Recast categorical variables as factors
+sim_miii <-
+  sim_miii %>%
+  dplyr::tibble() %>%
+  dplyr::mutate(
+    male =
+      factor(
+        x = male,
+        levels = 0:1,
+        labels = c("0. Female", "1. Male")
+      ),
+    across(
+      .cols = all_of(
+        x = c(
+          "hx_cvd",
+          "hx_hyperlipidemia",
+          "on_anticoagulants",
+          "on_antiplatelets"
+        )
+      ),
+      .fns = function(x)
+        factor(x, levels = 0:1, labels = c("0. No", "1. Yes"))
+    ),
+    across(.cols = starts_with("gcs") | starts_with("mrs"),
+           .fns = factor),
+    ich_location =
+      factor(x = ich_location,
+             levels = c("Deep", "Lobar")),
+    arm =
+      factor(x = arm,
+             levels = c("medical", "surgical")),
+    tx = 1 * (arm == "surgical")
+  ) %>%
+  dplyr::rename(id = sim_participant_id)
+```
+
+The complete simulated trial data without any missing values are in a `data.frame` named `sim_miii`.
+  
+  - Participant Identifier
+    - `id`: Participant Identifier
+  - Baseline Covariates
+    - `age`: Age at baseline in years
+    - `male`: Participant sex (1 for Male or 0 for female)
+    - `hx_cvd`: Cardiovascular disease history
+    - `hx_hyperlipidemia`: Hyperlipidaemia medication compliant history
+    - `on_anticoagulants`: On anticoagulants medication
+    - `on_antiplatelets`: On antiplatelet medication
+    - `ich_location`: Intracerebral haemorrhage clot location: (`Lobar`, `Deep`)
+    - `ich_s_volume`:	Intracerebral hemorrhage volume on stability scan
+    - `ivh_s_volume`:	Intraventricular hemorrhage volume on stability scan
+    - `gcs_category`: Severity of impairment as measured by Glasgow Coma Score (GCS)
+  - Treatment:
+    - `arm`: Treatment arm (surgical versus standard medical care)
+    - `tx`: Treatment arm (binary; 1 for surgical and 0 for standard medical care) 
+    - `ich_eot_volume`: Intracerebral hemorrhage volume on end-of-treatment scan
+  - Outcomes:
+    - `mrs_30d`: mRS at 30 days (`0-3`, `4`, `5`, `6`)
+    - `mrs_30d_complete`: mRS at 30 days if no data were missing
+    - `mrs_180d`: mRS at 180 days (`0-2`, `3`, `4`, `5`, `6`)
+    - `mrs_180d_complete`: mRS at 180 days if no data were missing
+    - `mrs_365d`: mRS at 365 days (`0-1`, `2`, `3`, `4`, `5`, `6`)
+    - `mrs_365d_complete`: mRS at 365 days if no data were missing
+    - `days_on_study`: days until death or administrative censoring
+    - `died_on_study`: participant died (`1`) or is censored (`0`)
+    
+The outcomes `mrs_30d`, `mrs_180d`, and `mrs_365d` contain missing values: the actual values before the missingness mechanism is applied are also included with the `_complete` suffix.
+
+### Define Dichotomized Outcomes
+The primary outcome was defined as having a modified Rankin Scale (mRS) score of 0-3 measured 365 days from enrollment (defined as a *success*). We therefore dichotomized `mrs_30d_complete`, `mrs_180d_complete` and `mrs_365d_complete`.
+
+```{r dichotomized-outcome-data}
+sim_miii$mrs_bin_30d_complete = ifelse(sim_miii$mrs_30d_complete == "0-3", 1, 0)
+sim_miii$mrs_bin_180d_complete = ifelse(
+  sim_miii$mrs_180d_complete == "0-2" ,
+  1,
+  ifelse(sim_miii$mrs_180d_complete ==
+           "3", 1,
+         0)
+)
+sim_miii$mrs_bin_365d_complete = ifelse(
+  sim_miii$mrs_365d_complete == "0-1" ,
+  1,
+  ifelse(
+    sim_miii$mrs_365d_complete == "2",
+    1,
+    ifelse(sim_miii$mrs_365d_complete ==
+             "3", 1,
+           0)
+  )
+)
+```
+  
+  - Dichotomized Outcomes:
+    - `mrs_bin_30d_complete`: Dichotomized mRS score at 30 days (1 if mRS equals 0–3, 0 otherwise)
+    - `mrs_bin_180d_complete`: Dichotomized mRS score at 180 days (1 if mRS equals 0–3, 0 otherwise)
+    - `mrs_bin_365d_complete`: Dichotomized mRS score at 365 days (1 if mRS equals 0–3, 0 otherwise)
+
+
+### Reference Level for Treatment
+
+When the treatment is a `factor` variable, we can use the `levels()` function to see the reference level (i.e., the comparator/control group): it will appear as the first level.
+
+```{r check-reference-level}
+# Check reference level
+levels(sim_miii$arm)
+```
+
+Make sure that the reference level is appropriately chosen before running analyses. In this case study, `medical' is the reference level.
+
+
+### Baseline Demographics & Stratum
+
+Below are summary statistics of participant characteristics at baseline:
+
+```{r table-demographic-characteristics-stratum}
+table1(
+  ~ age + male + hx_cvd + hx_hyperlipidemia + on_anticoagulants + on_antiplatelets +
+    ich_location + ich_s_volume + ivh_s_volume + gcs_category + ich_eot_volume |
+    arm,
+  data = sim_miii
+)
+```
+
+
+
+### Modified Rankin Scale Outcomes
+
+Here we summarize the outcomes of the study (without missing data):
+
+```{r table-mRS-outcomes}
+table1(
+  ~ mrs_30d_complete + mrs_180d_complete + mrs_365d_complete + mrs_bin_30d_complete +
+    mrs_bin_180d_complete + mrs_bin_365d_complete | arm,
+  data = sim_miii %>% dplyr::mutate(
+    mrs_bin_30d_complete =
+      factor(x = mrs_bin_30d_complete,
+             levels = c("0", "1")),
+    mrs_bin_180d_complete =
+      factor(x = mrs_bin_180d_complete,
+             levels = c("0", "1")),
+    mrs_bin_365d_complete =
+      factor(x = mrs_bin_365d_complete,
+             levels = c("0", "1"))
+  )
+)
+```
+
+
+### Define Enrollment Times
+In order to conduct information monitoring and/or repeated analyses over time, one needs to know the enrollment times for all participants. We therefore generate fictional enrollment times for all participants as well as the times when mRS outcomes are measured. The enrollment times are based on the recruitment rate in the MISTIE III trial, in which 2 participants are recruited per 5 days (i.e., 0.4 participants per day).
+
+```{r data-generation}
+set.seed(12345)
+# Enrollment times
+daily_enrollment <- 0.4
+sim_miii$enrollment_time <-
+  round(runif(
+    n = 1000,
+    min = 0,
+    max = 1000 / daily_enrollment
+  ))
+
+# Outcome times
+sim_miii$mrs_30d_time <- sim_miii$enrollment_time + 30
+sim_miii$mrs_180d_time <- sim_miii$enrollment_time + 180
+sim_miii$mrs_365d_time <- sim_miii$enrollment_time + 365
+```
+
+--------------------------------------------------------------------------------
+
+## Combining Covariate Adjustment with Information Adaptive Designs - No Interim Analyses
+### Information Adaptive Design
+In what follows, we use information adaptive designs. These involve continuous monitoring of the  estimated information (i.e., 1 divided by the estimated variance of the estimate) to determine when to conduct the analyses (e.g., interim analyses and/or the final analysis). Such designs can be used with unadjusted or covariate adjusted estimators. Our main motivation for considering information adaptive designs, however, is to apply them with covariate adjusted estimators; the combination of these approaches can lead to designs that take full advantage of precision gains from covariate adjustment.
+
+### Design Parameters
+The estimand in the trial was defined as the (absolute) risk difference, that is, the difference between the population proportion of successes under assignment to treatment versus control (where control was standard of care using medical management).
+The total sample size of approximately 498 patients was calculated based on the assumption that 25\% of the patients would have an mRS score of 0–3 in the standard medical care group versus 38\% of patients in the MISTIE group and provides a power of 88\% to detect such a population risk difference of 13\% at a 5\% significance level.
+
+#### Define estimand and estimator 
+We first define the estimand (risk difference), the estimation method (standardization) along with its parameters (e.g., prediction models). 
+```{r specify-estimation-parameters}
+estimationParameters = list(
+  estimationMethod = standardization,
+  estimand = "difference",
+  y0_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location + gcs_category,
+  y1_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location + gcs_category,
+  family = "binomial",
+  treatment_column = "tx"
+)
+```
+
+#### Define operational characteristics 
+We set the probabilities of success (under the alternative) for both arms, the Type I error and the power.
+```{r operational-characteristics}
+# Specification of operational characteristics
+probTreat = 0.38
+probContr = 0.25
+deltaAlt = probTreat - probContr
+alpha = 0.05
+beta = 0.12
+```
+
+#### Calculating the total information (i.e., setting threshold for analysis timing)
+We calculate the total information needed in an information adaptive design to achieve the Type I error and power goals. In particular, this defines the timing of the analysis by using the following formula
+$$\left(\frac{z_{\alpha/2}+z_\beta}{\Delta_{Alt}}\right)^2$$
+
+```{r information-one-analysis}
+# Calculation of total information
+inf_total = (qnorm(1 - alpha / 2) + qnorm(1 - beta)) ^ 2 / deltaAlt ^ 2
+inf_total # 581.5335
+```
+
+#### Calculating initial total sample size
+We recommend to initally set the projected maximum sample size for the trial (`n_maxInf`) conservatively, i.e., as if there would be no precision gain from covariate adjustment. We suggest to use emerging data at each interim analysis time to update `n_maxInf`. 
+This can be done periodically during the trial by computing a new projection at analysis time $t_k$ for the maximum sample size as follows:  
+$n(t_k)\left(\frac{z_{\alpha/2}+z_\beta}{\Delta_{Alt}}\right)^2 / \widehat{\mathcal{I}}_k,$
+where $n(t_k)$ is the number of patients that have completed follow up at analysis time $t_k$, $\widehat{\mathcal{I}}_k$ the corresponding information and $\Delta_{Alt}$ the treatment effect under the alternative. 
+
+```{r sample-size-one-analysis}
+# Sample size caclulation
+n_total = round((
+  power.prop.test(
+    power = 1 - beta,
+    p1 = probTreat,
+    p2 = probContr,
+    alternative = "two.sided",
+    sig.level = alpha
+  )$n
+) * 2)
+n_total # 498
+
+# Set initial total sample size for information monitoring
+n_maxInf = n_total
+```
+
+Note that the simulated MISTIE III dataset contains data for 1000 participants instead of 498. This is necessary to conduct the information monitoring (see later).
+
+### Conducting the Information Adaptive Design with One Analysis
+#### Continuous Monitoring of Information to Decide on Timing of the Analysis
+To determine the timing of the analysis, we monitor the information over time. In order to ensure that there are no participants in the pipeline, we stop recruitment once the number of participants reaches the projected/expected number of participants needed to reach the power. To speed up the monitoring, we only start when 100 participants have the primary endpoint available; similarly, we only update the information and projected sample size every time 10 additional participants have the primary endpoint available.
+
+At each monitoring point we:
+
+* Build a dataset corresponding with that monitoring point
+* Set parameters to calculate information
+* Calculate information for the current dataset 
+* Update total sample size based on current dataset
+```{r information-monitoring}
+# Calculate the time point and number of recruited participants 
+# at the time where 100 patients have primary endpoint available.
+k = 100
+analysis_time <- sort(sim_miii$mrs_365d_time)[k]
+n_recr <- sum(sim_miii$enrollment_time <= analysis_time)
+informationTime = 0.30
+
+while (n_recr <= n_maxInf) {
+  # Build the dataset at each monitoring point
+  analysis_dataset <- data_at_time_t(
+    data = sim_miii,
+    id_column = "id",
+    analysis_time = analysis_time,
+    enrollment_time = "enrollment_time",
+    treatment_column = "tx",
+    covariate_columns = c(
+      "ich_s_volume",
+      "age",
+      "gcs_category",
+      "ivh_s_volume",
+      "ich_location"
+    ),
+    outcome_columns = "mrs_bin_365d_complete",
+    outcome_times = "mrs_365d_time"
+  )
+  
+  analysis_dataset = analysis_dataset[which(analysis_dataset$mrs_365d_time <=
+                                              analysis_time),]
+  analysis_dataset = as.data.frame(x = analysis_dataset)
+  
+  # Specify parameters to calculate information
+  args_infFinal = c(
+    list(
+      data = analysis_dataset,
+      totalInformation = inf_total,
+      analysisNumber = 1,
+      bootstraps = 1000,
+      update = "no"
+    ),
+    estimationParameters
+  )
+  
+  # Call interimInformation to calculate information
+  infTimeFinal = do.call(what = interimInformation,
+                         args = args_infFinal)
+  
+  # Update projected total sample size - if the jump in information is not too large
+  if (infTimeFinal[[2]] <= (informationTime + 0.05)) {
+    n_maxInf = max(n_recr, ceiling(nrow(analysis_dataset) * infTimeFinal[[2]] ^
+                                     { -1 }
+                                   ))
+  }
+  informationTime = infTimeFinal[[2]]
+  
+  # Increase the number of patients with primary outcome available
+  k = k + 10
+  
+  # Calculate the analysis time and number of recruited participants
+  analysis_time <- sort(sim_miii$mrs_365d_time)[k]
+  n_recr <- sum(sim_miii$enrollment_time <= analysis_time)
+  
+}
+
+# Projected total sample size
+n_maxInf
+```
+
+Note that `n_maxInf` is higher than the originally projected 498 participants. 
+
+#### Conducting the Final Analysis
+We can then conduct the (final) analysis when `n_maxInf` participants have the primary endpoint available. We first build the corresponding dataset, based on which we then conduct the (final) analysis. Using the function `interimAnalysis` from the packages `GSDCovAdj`, we can then make a decision (i.e., whether to reject the null hypothesis or not).
+
+```{r final-analysis, warning = FALSE}
+# Calculate the (final) analysis time
+analysis_time <- sort(sim_miii$mrs_365d_time)[n_maxInf]
+
+# Build the dataset at that analysis time
+analysis_dataset <- data_at_time_t(
+  data = sim_miii,
+  id_column = "id",
+  analysis_time = analysis_time,
+  enrollment_time = "enrollment_time",
+  treatment_column = "tx",
+  covariate_columns = c(
+    "ich_s_volume",
+    "age",
+    "gcs_category",
+    "ivh_s_volume",
+    "ich_location"
+  ),
+  outcome_columns = "mrs_bin_365d_complete",
+  outcome_times = "mrs_365d_time"
+)
+
+analysis_dataset = analysis_dataset[which(analysis_dataset$mrs_365d_time <=
+                                            analysis_time),]
+analysis_dataset = as.data.frame(x = analysis_dataset)
+
+# Specify the parameters for the (final) analysis
+args_analysis = c(
+  list(
+    data = analysis_dataset,
+    totalInformation = inf_total,
+    analysisNumber = 1,
+    null.value = 0,
+    alpha = alpha,
+    beta = beta,
+    alternative = "two.sided",
+    typeOfDesign = "asOF",
+    plannedAnalyses = 1,
+    plannedInformationTimes = 1,
+    bootstraps = 1000,
+    update = "yes"
+  ),
+  estimationParameters
+)
+
+# Call interimAnalysis to conduct the final analysis
+finalAnalysisAdj = do.call(what = interimAnalysis,
+                           args = args_analysis)
+
+# Test Statistic and Decision
+finalAnalysisAdj$testStatisticUpdated
+finalAnalysisAdj$decisionUpdated
+finalAnalysisAdj$informationTimeUpdated
+```
+
+As the updated test statistic is smaller than 1.96, we cannot reject the null hypothesis. This is also shown by fact that `finalAnalysisAdj$decisionUpdated` equals `"No"`, which means that the null hypothesis was not rejected. The sample size needed to come to this conclusion (521) is higher than if we had used a fixed sample size design without covariate adjustment. This indicates that a fixed sample size design with covariate adjustment would have led to an underpowered trial due to the wrong assumptions about the nuisance parameters. Note that this would also be the case when we would be using an undajusted estimator as in that case information monitoring would lead to a total sample size of 566.
+Thus, the information adaptive design has the advantage that it will always lead to the right power under a certain alternative.
+
+## Combining Covariate Adjustment with Group Sequential, Information Adaptive Designs
+### Design Parameters
+We a design with two analyses, one interim analysis at 50\% of the information and a final analysis at 100\% of the information.  
+
+#### Define estimand and estimator
+We first define the estimand (risk difference), the estimation method (standardization) along with its parameters (e.g., prediction models). 
+```{r specify-estimation-parameters-gsd}
+estimationParameters = list(
+  estimationMethod = standardization,
+  estimand = "difference",
+  y0_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location,
+  y1_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location,
+  family = "binomial",
+  treatment_column = "tx"
+)
+```
+
+#### Define operational characteristics
+We set the probabilities of success (under the alternative) for both arms, the Type I error and the power.
+```{r operational-characteristics-gsd}
+# Specification of operational characteristics
+probTreat = 0.38
+probContr = 0.25
+deltaAlt = probTreat - probContr
+alpha = 0.05
+beta = 0.12
+```
+
+
+#### Calculating the total information 
+We calculate the total information needed in an information adaptive design to achieve the Type I error and power goals. In particular, this defines the timing of the analysis by using the following formula
+$$\left(\frac{z_{\alpha/2}+z_\beta}{\Delta_{Alt}}\right)^2IF,$$
+with IF an inflation factor based on the chosen group sequential design.
+```{r information-monitoring-gsd}
+# Group sequential design parameters
+design_par = getDesignGroupSequential(
+  sided = 2,
+  alpha = alpha,
+  beta = beta,
+  informationRates = c(0.50, 1),
+  typeOfDesign = "asOF"
+)
+design_par
+# Critical values: 2.963, 1.969
+
+# Determine Inflation Factor
+getDesignCharacteristics(design_par) # Inflation factor: 1.0035
+
+# Calculation of total information
+inf_total = 1.0035 * (qnorm(1 - alpha / 2) + qnorm(1 - beta)) ^ 2 / deltaAlt ^
+  2
+inf_total # 583.5689
+```
+
+#### Calculation initial total sample size 
+We recommend to initally set the projected maximum sample size for the trial (`n_maxInf`) conservatively, i.e., as if there would be no precision gain from covariate adjustment. We suggest to use emerging data at each interim analysis time to update `n_maxInf`.
+
+```{r sample-size-gsd}
+# Sample size calculation
+n_total = 1.0035 * round((
+  power.prop.test(
+    power = 1 - beta,
+    p1 = probTreat,
+    p2 = probContr,
+    alternative = "two.sided",
+    sig.level = alpha
+  )$n
+) * 2)
+n_total # 500
+
+# Set initial total sample size for information monitoring
+n_maxInf = n_total
+n_maxInf
+```
+
+
+### Conducting the Group Sequential, Information Adaptive Design
+#### Continuous Monitoring of Information to Decide on Timing of the Interim Analysis
+To determine the timing of the interim analysis, we monitor the information over time. In order to ensure that there are no participants in the pipeline, we stop recruitment once the number of participants reaches the projected/expected number of participants at the end of the trial. To speed up the monitoring, we only start when 100 participants have the primary endpoint available; similarly, we only update the information and projected sample size every time 10 additional participants have the primary endpoint available.
+
+At each monitoring point we:
+
+* Build a dataset corresponding with that monitoring point
+* Set parameters to calculate information
+* Calculate information for the current dataset 
+* Update total sample size based on current dataset (if recruitment didn't stop yet)
+
+```{r information-monitoring-interim-gsd}
+# Set initial values
+k = 100
+information = 0.30
+recruitmentStopped = "no"
+while (information <= 0.5 | information >= 0.65) {
+  # Calculate the analysis time and number of recruited participants
+  analysis_time <- sort(sim_miii$mrs_365d_time)[k]
+  n_recr <- sum(sim_miii$enrollment_time <= analysis_time)
+  
+  # Build the dataset at that analysis time
+  analysis_dataset <- data_at_time_t(
+    data = sim_miii,
+    id_column = "id",
+    analysis_time = analysis_time,
+    enrollment_time = "enrollment_time",
+    treatment_column = "tx",
+    covariate_columns = c(
+      "ich_s_volume",
+      "age",
+      "gcs_category",
+      "ivh_s_volume",
+      "ich_location"
+    ),
+    outcome_columns = "mrs_bin_365d_complete",
+    outcome_times = "mrs_365d_time"
+  )
+  
+  analysis_dataset <- as.data.frame(x = analysis_dataset)
+  
+  # Ensure that we do not recruit more patients than n_maxInf
+  if (n_recr > n_maxInf) {
+    selection = which(analysis_dataset$enrollment_time <= sort(analysis_dataset$enrollment_time)[n_maxInf])
+    analysis_dataset = analysis_dataset[selection,]
+    recruitmentStopped = "yes"
+  }
+  
+  # Specify parameters to calculate information
+  args_inf = c(
+    list(
+      data = analysis_dataset,
+      totalInformation = inf_total,
+      analysisNumber = 1,
+      bootstraps = 1000,
+      update = "no"
+    ),
+    estimationParameters
+  )
+  # Call interimInformation to conduct the final analysis
+  infTime = do.call(what = interimInformation,
+                    args = args_inf)
+  
+  # Update n_maxInf if recruitment did not stop yet
+  if (recruitmentStopped == "no" &
+      infTime[[2]] <= (information + 0.05)) {
+    analysis_dataset2 = analysis_dataset[which(analysis_dataset$mrs_365d_time <=
+                                                 analysis_time),]
+    
+    args_infFinal = c(
+      list(
+        data = analysis_dataset2,
+        totalInformation = inf_total,
+        analysisNumber = 2,
+        bootstraps = 1000,
+        update = "no"
+      ),
+      estimationParameters
+    )
+    
+    infTimeFinal = do.call(what = interimInformation,
+                           args = args_infFinal)
+    
+    n_maxInf = max(n_recr, ceiling(nrow(analysis_dataset2) * (infTimeFinal[[2]]) ^
+                                     {
+                                       -1
+                                     }))
+  }
+  information = infTime[[2]]
+  
+  # Increase the number of patients with primary outcome available
+  k = k + 10
+  
+}
+```
+
+#### Conducting the Interim Analysis
+Once the information fraction of 50\% is reached, we conduct the interim analysis based on the dataset `analysis_dataset`.
+```{r interim-analysis-gsd, warning=FALSE}
+# Specify the parameters for the interim analysis
+args_analysis = c(
+  list(
+    data = analysis_dataset,
+    totalInformation = inf_total,
+    analysisNumber = 1,
+    null.value = 0,
+    alpha = 0.05,
+    beta = 0.12,
+    alternative = "two.sided",
+    typeOfDesign = "asOF",
+    plannedAnalyses = 2,
+    plannedInformationTimes = c(0.5, 1),
+    bootstraps = 1000,
+    update = "yes"
+  ),
+  estimationParameters
+)
+# Call interimAnalysis to conduct the interim analysis
+interimAnalysisAdj = do.call(what = interimAnalysis,
+                             args = args_analysis)
+
+# Test statistic and decision
+interimAnalysisAdj$testStatisticUpdate
+interimAnalysisAdj$decisionUpdate  
+interimAnalysisAdj$informationTimeUpdated
+```
+
+As the updated test statistic is smaller than 2.963, we cannot reject the null hypothesis at the interim look.
+
+##### Set parameters for orthogonalization
+In order to be able to do the orthogonalization to ensure the independent increments assumption holds, we need to keep track of the estimate, standard error, information time and dataset at the interim analysis.
+```{r interim-information-orthogonalization}
+previousEstimates = interimAnalysisAdj$estimateOriginal
+covMatrix = interimAnalysisAdj$covMatrixOriginal
+previousTimes = interimAnalysisAdj$informationTimeOriginal
+previousTimesUpd = interimAnalysisAdj$informationTimeUpdated
+previousDatasets = list(analysis_dataset)
+
+previousEstimationParameters = list(
+  estimationMethod = standardization,
+  #estimand = "difference",
+  y0_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location,
+  y1_formula = mrs_bin_365d_complete ~ ich_s_volume +
+    age + ivh_s_volume + ich_location,
+  family = "binomial",
+  treatment_column = "tx"
+)
+```
+
+
+#### Continuous Monitoring of Information to Decide on Timing of the Final Analysis
+We keep continuously monitoring the information till we can conduct the final analysis by following the same steps as before.
+
+```{r information-monitoring-final-gsd}
+# Calculate the analysis time and number of recruited participants
+analysis_time <- sort(sim_miii$mrs_365d_time)[k]
+n_recr <- sum(sim_miii$enrollment_time <= analysis_time)
+
+while (n_recr <= n_maxInf) {
+  # Build the dataset at that analysis time
+  analysis_dataset <- data_at_time_t(
+    data = sim_miii,
+    id_column = "id",
+    analysis_time = analysis_time,
+    enrollment_time = "enrollment_time",
+    treatment_column = "tx",
+    covariate_columns = c(
+      "ich_s_volume",
+      "age",
+      "gcs_category",
+      "ivh_s_volume",
+      "ich_location"
+    ),
+    outcome_columns = "mrs_bin_365d_complete",
+    outcome_times = "mrs_365d_time"
+  )
+  
+  analysis_dataset = analysis_dataset[which(analysis_dataset$mrs_365d_time <=
+                                              analysis_time),]
+  analysis_dataset = as.data.frame(x = analysis_dataset)
+  
+  # Specify parameters to calculate information
+  args_infFinal = c(
+    list(
+      data = analysis_dataset,
+      totalInformation = inf_total,
+      analysisNumber = 2,
+      bootstraps = 1000,
+      update = "no",
+      plannedInformationTimes = c(0.5, 1),
+      previousEstimatesOriginal = previousEstimates,
+      previousCovMatrixOriginal = covMatrix,
+      previousInformationTimesOriginal = previousTimes,
+      previousInformationTimesUpdated = previousTimesUpd,
+      previousDatasets = previousDatasets,
+      parametersPreviousEstimators = list(previousEstimationParameters)
+    ),
+    estimationParameters
+  )
+  # Call interimInformation to conduct the final analysis
+  infTimeFinal = do.call(what = interimInformation,
+                         args = args_infFinal)
+  
+  # Update projected total sample size - if the jump in information is not too big
+  if (infTimeFinal[[2]] <= (information + 0.05)) {
+    n_maxInf = max(n_recr, ceiling(nrow(analysis_dataset) * infTimeFinal[[2]] ^
+                                     {
+                                       -1
+                                     }))
+  }
+  information = infTimeFinal[[2]]
+  
+  # Increase the number of patients with primary outcome available
+  k = k + 10
+  
+  # Calculate the analysis time and number of recruited participants
+  analysis_time <- sort(sim_miii$mrs_365d_time)[k]
+  n_recr <- sum(sim_miii$enrollment_time <= analysis_time)
+  
+}
+
+# projected total sample size
+n_maxInf
+```
+
+#### Conducting the Final Analysis
+We can then conduct the final analysis when `n_maxInf` participants have the primary endpoint available. We first build the corresponding dataset, based on which we then conduct the (final) analysis. Using the function `interimAnalysis` from the packages `GSDCovAdj`, we can then make a decision (i.e., whether to reject the null hypothesis or not).
+```{r final-analysis-gsd, warning = FALSE}
+# Calculate the analysis time
+analysis_time <- sort(sim_miii$mrs_365d_time)[n_maxInf]
+
+# Build the dataset at that analysis time
+analysis_dataset <- data_at_time_t(
+  data = sim_miii,
+  id_column = "id",
+  analysis_time = analysis_time,
+  enrollment_time = "enrollment_time",
+  treatment_column = "tx",
+  covariate_columns = c(
+    "ich_s_volume",
+    "age",
+    "gcs_category",
+    "ivh_s_volume",
+    "ich_location"
+  ),
+  outcome_columns = "mrs_bin_365d_complete",
+  outcome_times = "mrs_365d_time"
+)
+
+analysis_dataset = analysis_dataset[which(analysis_dataset$mrs_365d_time <=
+                                            analysis_time), ]
+analysis_dataset = as.data.frame(x = analysis_dataset)
+
+
+# Specify the parameters for the final analysis
+args_analysis = c(
+  list(
+    data = analysis_dataset,
+    totalInformation = inf_total,
+    analysisNumber = 2,
+    null.value = 0,
+    alpha = alpha,
+    beta = beta,
+    alternative = "two.sided",
+    typeOfDesign = "OF",
+    plannedAnalyses = 2,
+    plannedInformationTimes = c(0.5, 1),
+    bootstraps = 1000,
+    update = "yes",
+    previousEstimatesOriginal = previousEstimates,
+    previousCovMatrixOriginal = covMatrix,
+    previousInformationTimesOriginal = previousTimes,
+    previousInformationTimesUpdated = previousTimesUpd,
+    previousDatasets = previousDatasets,
+    parametersPreviousEstimators = list(previousEstimationParameters)
+  ),
+  estimationParameters
+)
+
+# Call interimAnalysis to conduct the final analysis
+final = do.call(what = interimAnalysis,
+                args = args_analysis)
+
+# Test statistic and decision
+final$testStatisticUpdated
+final$decisionUpdated
+final$informationTimeUpdated
+```
+We do reject the null hypothesis.
