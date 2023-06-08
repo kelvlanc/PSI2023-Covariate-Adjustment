@@ -1,0 +1,839 @@
+---
+title: "Hands-On Tutorials for Covariate Adjustment in Randomized Trials"
+subtitle: "Time-To-Event Outcome"
+author: "Josh Betz (jbetz@jhu.edu), Kelly Van Lancker (kvanlan3@jhu.edu), and Michael Rosenblum (mrosen@jhu.edu)"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+header-includes:
+   - \usepackage{amsmath}
+output:
+  ioslides_presentation:
+    widescreen: true
+    incremental: true
+bibliography: covariate_adjustment.bib # For Bibliography - In same folder
+---
+
+
+
+
+```{r setup, include = FALSE}
+# Packages used for formatting, not needed for analysis
+library(pander)
+library(knitr)
+library(Cairo)
+
+### Graphics and Report Options ################################################
+table_digits <- 1 # Significant Figures for Mean/SD, N (%), Median/IQR
+
+root_url <- "https://jbetz-jhu.github.io/CovariateAdjustmentTutorial"
+
+load(
+  url(
+    paste0("https://github.com/kelvlanc/PSI2023-Covariate-Adjustment/raw/",
+           "main/Betz/sim_mistie_iii_1.2_tmle.Rdata")
+  )
+)
+
+
+bootstrap_tutorial_url <-
+  paste0(root_url, "/bootstrap_tutorial.html")
+
+estimands_tutorial_url <-
+  paste0(root_url, "/blob/gh-pages/Estimands_of_Interest.html")
+
+estimators_tutorial_url <-
+  paste0(root_url, "/blob/gh-pages/Estimators.html")
+
+
+
+
+### Set Default Options ########################################################
+options(
+  knitr.kable.NA = "",
+  width = 300
+)
+
+run_adjrct <- FALSE
+run_adjrct <- TRUE # Takes time
+
+
+### Set Default Options ########################################################
+fig_w <- 8
+fig_h <- 8
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  results = "markup",
+  fig.width = fig_w,
+  fig.height = fig_h,
+  fig.align = "center",
+  out.width = "90%",
+  out.height = "90%",
+  dpi = 600,
+  dev = "CairoPNG"
+)
+
+### options ####################################################################
+options(
+  knitr.kable.NA = ''
+)
+```
+
+```{r Load-Data-and-Packages, echo = FALSE, message = FALSE}
+suppressWarnings({
+  suppressMessages({
+    library(knitr) # Printing tables in reports
+    library(tidyverse) # Data manipulation: dplyr, tidyr
+    library(table1) # Creation of Summary tables
+    library(survival) # AFT & Cox PH Model
+    library(survminer) # Kaplan-Meier Plots
+    library(coxrobust) # coxr: Robust Cox PH Model
+    library(survRM2) # Restricted mean survival times (RMST)
+    library(adjrct) # RMST, Survival Probability
+    library(splines) # Smoothing splines
+  })
+})
+
+
+data_url <-
+  "https://github.com/jbetz-jhu/CovariateAdjustmentTutorial/raw/main/Simulated_MISTIE_III_v1.2.csv"
+
+sim_miii <-
+  read.csv(file = url(data_url)) %>% 
+  dplyr::slice(
+    1:500
+  )
+
+# Read in data: Recast categorical variables as factors
+sim_miii <-
+  sim_miii %>% 
+  dplyr::tibble() %>% 
+  dplyr::mutate(
+    male =
+      factor(x = male, levels = 0:1, labels = c("0. Female", "1. Male")),
+    across(
+      .cols = all_of(x = c("hx_cvd", "hx_hyperlipidemia",
+                           "on_anticoagulants", "on_antiplatelets")),
+      .fns = function(x) factor(x, levels = 0:1, labels = c("0. No", "1. Yes"))
+    ),
+    across(
+      .cols = starts_with("gcs") | starts_with("mrs"),
+      .fns = factor
+    ),
+    ich_location =
+      factor(
+        x = ich_location,
+        levels = c("Deep", "Lobar")
+      ),
+    arm =
+      factor(
+        x = arm,
+        levels = c("medical", "surgical")
+      ),
+    tx = 1*(arm == "surgical")
+  )
+```
+
+
+<style>
+.forceBreak { -webkit-column-break-after: always; break-after: column; }
+</style>
+
+
+
+## Outline:
+
+  - Covariate Adjustment Tutorials page
+  - Worked Example: Time-To-Event Outcomes
+    - Example: Mortality in MISTIE III Hemorrhagic Stroke Trial
+    - Unadjusted: Logrank, Cox, Survival Probability, RMST
+    - Adjusted: Cox, Survival Probability, RMST
+
+
+
+
+# Hands-On Tutorials for Covariate Adjustment | [https://bit.ly/covariateadjustedrcts](https://bit.ly/covariateadjustedrcts)
+
+
+
+
+## Tutorials on Covariate Adjustment | [https://bit.ly/covariateadjustedrcts](https://bit.ly/covariateadjustedrcts)
+
+  - Simulated data: mimic features of trials - Scale, correlations, missingness
+    - Continuous, Ordinal, Binary, Time-to-Event outcomes: Covariates
+    - Example datasets: Substance Abuse, Hemorrhagic Stroke
+    - Stratified randomization: improve precision
+  - Common estimands of interest; Analytic approaches
+  - R code for tabulating, plotting, analyzing data:
+    - Unadjusted & Adjusted
+  - Links to resources on learning and using R
+
+
+
+
+# Example: based on MISTIE III | Functional Outcome & Mortality in Hemorrhagic Stroke
+
+
+
+
+## MISTIE-III Trial: [@Hanley2019]
+
+  - Hemorrhagic Stroke: Greater morbidity, mortality than ischemic stroke
+    - Intracerebral Hemorrhage (ICH), possibly with Intraventricular Hemorrhage (IVH)
+  - Consent: monitor daily for ICH stability by CT
+  - 1:1 randomized - minimally invasive surgery + thrombolytic vs. SOC medical management
+  - Safety & Efficacy: Functional outcome on Modified Rankin Scale (MRS)
+    - MRS at 30, 180, and 365 days post randomization
+    - Mortality: Administratively censored at 1-year follow-up
+  - Good Outcome: MRS 0-3 vs. 4-6 - independent vs. not
+  - Simulated data based on actual trial data: **not actual study data.**
+
+
+
+
+## Simulated MISTIE Data: {.columns-2 .smaller}
+
+  - Baseline Covariates
+    - `age`: Age in years
+    - `male`: male sex
+    - `hx_cvd`:	cardiovascular disease history
+    - `hx_hyperlipidemia`:	hyperlipidemia
+    - `on_anticoagulants`:	on anticoagulants
+    - `on_antiplatelets`:	on antiplatelets
+    - `ich_location`: ICH: (`Lobar`, `Deep`)
+    - `ich_s_volume`:	ICH volume on stability scan
+    - `ivh_s_volume`:	IVH volume on stability scan
+    - `gcs_category`: presenting Glasgow Coma Score
+
+
+<p class="forceBreak"></p>
+
+
+  - Treatment:
+    - `arm`: treatment arm
+    - `ich_eot_volume`: intracerebral hemorrhage volume on end-of-treatment scan
+  - Outcome:
+    - Modified Rankin: `_complete`: completely observed
+    - `mrs_30d`: MRS at 30 days (`0-3`, `4`, `5`, `6`)
+    - `mrs_180d`: MRS at 180 days (`0-2`, `3`, `4`, `5`, `6`)
+    - `mrs_365d`: MRS at 365 days (`0-1`, `2`, `3`, `4`, `5`, `6`)
+    - `days_on_study`: days until death/censoring
+    - `died_on_study`: participant died (`1`) or censored (`0`)
+
+
+# Show of Hands: Familiarity with R | Beginner, Intermediate, Expert - **NO JUDGEMENT!**
+
+
+## Installing R Packages from GitHub {.columns-2 .smaller}
+
+  - "Base R" comes with set of packages:
+    - Expanded to extend capabilities
+  - [CRAN](https://cran.r-project.org/): Comprehensive R Archival Network
+    - Can use `install_packages()` to install packages from CRAN, BioC, R-Forge
+  - [RTools](https://cran.r-project.org/bin/windows/Rtools/): Tools for compiling packages from source
+  - [Github](https://github.com/): developing software and documentation with version control
+    - Can Use `devtools::install_github` to install packages hosted on Github
+  - Load installed packages using `library()`
+
+
+<p class="forceBreak"></p>
+
+
+```{r install-github, eval = FALSE}
+devtools::install_github("nt-williams/simul")
+devtools::install_github("nt-williams/adjrct")
+```
+
+```{r load-packages, eval = FALSE}
+library(knitr) # Printing tables in reports
+library(tidyverse) # Data manipulation: dplyr, tidyr
+library(table1) # Creation of Summary tables
+library(survival) # AFT & Cox PH Model
+library(survminer) # Kaplan-Meier Plots
+library(coxrobust) # coxr: Robust Cox PH Model
+library(survRM2) # Restricted mean survival times (RMST)
+library(adjrct) # RMST, Survival Probability
+library(splines) # Smoothing splines
+```
+
+
+
+
+# Baseline Comparability | Balance of Covariates
+
+
+
+
+## Baseline Comparability  {.columns-2 .smaller}
+
+Below are summary statistics of participant characteristics at baseline.
+
+```{r table-baseline-example-code, eval = FALSE}
+table1::table1(
+  ~ age + male +
+    on_antiplatelets +
+    ich_location +
+    ich_s_volume +
+    ivh_s_volume +
+    gcs_category | arm, 
+  data = sim_miii
+)
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r table-baseline-evaluate, echo = FALSE}
+table1::table1(
+  ~ age + male +
+    on_antiplatelets +
+    ich_location +
+    ich_s_volume +
+    ivh_s_volume +
+    gcs_category | arm, 
+  data = sim_miii
+)
+```
+
+
+
+
+## Conventional Unadjusted Estimators: {.smaller}
+
+  - Kaplan Meier: assumes censoring independent of event time in treatment arm
+    - Violated: baseline covariates associated with event times & dropout [@Diaz2018]
+  - Logrank Test: valid if censoring is independent of treatment or the event time in each treatment arm [@VanLancker2021].
+    - Most powerful under proportional hazards assumption: weighted logrank test [@Lin2017]
+  - Cox Proportional Hazards (PH) Model: Score test equivalent to Logrank Test
+    - Valid test of null: Sandwich estimator is used and either:
+      - Censoring conditionally independent of treatment assignment given the covariates
+      - Censoring conditionally independent of the covariates given treatment assignment
+    - PH Assumption violated: weighted average of hazards, depend on censoring distribution
+    - Hazard: time-varying instantaneous rate of events occur: 
+      - Does not quantify the expected length of time until the event [@Rudser2012]
+
+
+
+
+## Alternatives to Logrank & Cox PH
+
+  - Time Horizon: specific, clinically meaningful time to assess outcome: $\tau$
+  - Restricted Mean Survival Time: average time-to-event (e.g. life expectancy when mortality is the event of interest) from baseline to a pre-specified point in time, denoted $\tau$.
+  - Survival Probability (SP): probability of being event-free at a pre-specified point in time, denoted $\tau$.
+  - SP and RMST interpretable when PH assumption is violated: Clinically relevant
+  - Doubly-robust estimators for SP and RMST and estimators exist - at least as efficient as the K-M estimator [@Diaz2018].
+
+
+
+
+## Kaplan Meier {.columns-2 .smaller}
+
+```{r kaplan-meier-death-example-code, eval = FALSE}
+time_to_death_km <-
+  survfit(
+    formula =
+      Surv(time = days_on_study,
+           event = died_on_study) ~ arm,
+    data = sim_miii
+  )
+
+ggsurvplot(
+  fit = time_to_death_km,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlab = "Days", 
+  ylab = "Survival probability"
+)
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r kaplan-meier-death-evaluate, echo = FALSE}
+time_to_death_km <-
+  survfit(
+    formula =
+      Surv(time = days_on_study,
+           event = died_on_study) ~ arm,
+    data = sim_miii
+  )
+
+ggsurvplot(
+  fit = time_to_death_km,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  xlab = "Days", 
+  ylab = "Survival probability"
+)
+```
+
+
+
+
+## Logrank Test
+
+  - Logrank test (G-rho family of tests): `survival::survdiff`
+
+```{r unadjusted-logrank-test-evaluate}
+survival::survdiff(
+  formula =
+    Surv(time = days_on_study,
+         event = died_on_study) ~ arm,
+  data = sim_miii
+)
+```
+
+
+
+
+## Unadjusted Cox Model: {.smaller}
+
+```{r unadjusted-Cox-PH}
+unadjusted_cox <-
+  survival::coxph(
+    formula =
+      Surv(time = days_on_study,
+           event = died_on_study) ~ arm,
+    ties = "efron",
+    robust = TRUE,
+    data = sim_miii
+  )
+summary(unadjusted_cox)
+```
+
+
+
+
+## Proportional Hazards Assumption {.columns-2 .smaller}
+
+```{r unadjusted-Cox-PH-test-echo, eval = FALSE}
+unadjusted_cox_ph_test <-
+  cox.zph(unadjusted_cox)
+print(unadjusted_cox_ph_test)
+# Plot Proportionality Results
+plot(cox.zph(unadjusted_cox),
+     main = "Proportional Hazards Test")
+abline(h = 0, col = "red")
+```
+
+```{r unadjusted-Cox-PH-test-evaluate, echo = FALSE}
+unadjusted_cox_ph_test <-
+  cox.zph(unadjusted_cox)
+print(unadjusted_cox_ph_test)
+```
+
+
+<p class="forceBreak"></p>
+
+```{r unadjusted-Cox-PH-plot-evaluate, echo = FALSE}
+plot(cox.zph(unadjusted_cox),
+     main = "Proportional Hazards Test")
+abline(h = 0, col = "red")
+```
+
+
+
+
+## Unadjusted Restricted Mean Survival Time {.columns-2 .smaller}
+
+  - RMST in first 90 days:
+  - ~85 days in the surgical arm
+  - ~76 days in the medical arm
+  - Difference: 8.8 days
+  - Ratio: 1.12 (12% increase in RMST).
+
+```{r unadjusted-restricted-mean-survival-time-rmst2-echo, eval = FALSE}
+with(
+  sim_miii,
+  survRM2::rmst2(
+    time = days_on_study,
+    status = died_on_study,
+    arm = tx,
+    tau = 90
+  )
+)
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r unadjusted-restricted-mean-survival-time-rmst2-evaluate, echo = FALSE}
+with(
+  sim_miii,
+  survRM2::rmst2(
+    time = days_on_study,
+    status = died_on_study,
+    arm = tx,
+    tau = 90
+  )
+)
+```
+
+
+
+
+## TMLE: RMST & Survival Probability {.columns-2 .smaller}
+
+  - Targeted Maximum Likelihood Estimation
+  - Compute "survival metadata" using `survrct`
+  - Use result to compute RMST & Survival Probability
+
+
+<p class="forceBreak"></p>
+
+
+```{r unadjusted-tmle-survival-metadata-adjrct, eval = FALSE}
+surv_metadata_unadj <-
+  adjrct::survrct(
+    outcome.formula =
+      Surv(days_on_study, died_on_study) ~ tx, 
+    trt.formula = tx ~ 1,
+    data = sim_miii,
+  )
+```
+
+```{r unadjusted-tmle-survival-rmst-adjrct, eval = FALSE}
+adjrct::rmst(
+  metadata = surv_metadata_unadj,
+  horizon = 90
+)
+```
+
+```{r unadjusted-tmle-survival-probability-adjrct, eval = FALSE}
+adjrct::survprob(
+  metadata = surv_metadata_unadj,
+  horizon = 90
+)
+```
+
+
+
+
+## TMLE: RMST & Survival Probability {.columns-2 .smaller}
+
+```{r echo = FALSE}
+rmst_tmle_unadj <-
+  adjrct::rmst(
+    metadata = surv_metadata_unadj,
+    horizon = 90
+  )
+
+rmst_metadata_unadj_table <-
+  with(
+    rmst_tmle_unadj$estimates[[1]],
+
+    bind_rows(
+      data.frame(
+        Arm = "Treatment",
+        Estimate = arm1,
+        SE = arm1.std.error,
+        LCL = arm1.conf.low,
+        UCL = arm1.conf.high
+      ),
+
+      data.frame(
+        Arm = "Control",
+        Estimate = arm0,
+        SE = arm0.std.error,
+        LCL = arm0.conf.low,
+        UCL = arm0.conf.high
+      ),
+      data.frame(
+        Arm = "Treatment - Control",
+        Estimate = theta,
+        SE = std.error,
+        LCL = theta.conf.low,
+        UCL = theta.conf.high
+      )
+    )
+  )
+
+kable(
+  x = rmst_metadata_unadj_table,
+  caption = "TMLE unadjusted estimates of Restricted Mean Survival Time.",
+  digits = 2
+)
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r echo = FALSE, warning = FALSE}
+survival_probability_unadj <-
+  adjrct::survprob(
+    metadata = surv_metadata_unadj,
+    horizon = 90
+  )
+
+survival_probability_unadj_table <-
+  with(
+    survival_probability_unadj$estimates[[1]],
+
+    bind_rows(
+      data.frame(
+        Arm = "Treatment",
+        Estimate = arm1,
+        SE = arm1.std.error,
+        LCL = arm1.conf.low,
+        UCL = arm1.conf.high
+      ),
+
+      data.frame(
+        Arm = "Control",
+        Estimate = arm0,
+        SE = arm0.std.error,
+        LCL = arm0.conf.low,
+        UCL = arm0.conf.high
+      ),
+      data.frame(
+        Arm = "Treatment - Control",
+        Estimate = theta,
+        SE = std.error,
+        LCL = theta.conf.low,
+        UCL = theta.conf.high
+      )
+    )
+  )
+
+kable(
+  x = survival_probability_unadj_table,
+  caption = "TMLE unadjusted estimates of Restricted Mean Survival Time.",
+  digits = 2
+)
+```
+
+
+
+
+# Covariate Adjusted Analyses | Cox PH, RMST, Survival Probability
+
+
+
+## Adjusted Cox PH Model
+
+```{r adjusted-cox-linear}
+adjusted_cox_linear <-
+  coxph(
+    formula = Surv(days_on_study, died_on_study) ~ arm +
+      # Covariates
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets + ich_location +
+      ich_s_volume + ivh_s_volume + gcs_category,
+    ties = "efron", # Efron's Method for Ties
+    robust = TRUE, # Use Robust SEs
+    data = sim_miii
+  )
+```
+
+
+
+
+## Adjustment with Penalized Splines: `survival::pspline()`
+
+```{r adjusted-cox-pspline}
+adjusted_cox_ps <-
+  coxph(
+    formula = Surv(days_on_study, died_on_study) ~ arm +
+      # Covariates
+      pspline(age) + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets + ich_location +
+      pspline(ich_s_volume) + pspline(ivh_s_volume) + gcs_category,
+    # Use Efron's Method for Tied Event Times
+    ties = "efron",
+    # Use Robust Standard Errors
+    robust = TRUE,
+    data = sim_miii
+  )
+```
+
+
+
+
+## Adjusted Cox Proportionality {.columns-2 .smaller}
+
+```{r adjusted-cox-ps-proportionality}
+cox.zph(
+  fit = adjusted_cox_ps
+)
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r adjusted-cox-ps-proportionality-plot}
+cox.zph(fit = adjusted_cox_ps) %>% 
+  plot(var = "arm")
+abline(h = 0, col = rgb(1, 0, 0, 0.75))
+```
+
+
+
+
+## Adjusted TMLE: RMST & Survival Probability {.smaller}
+
+```{r adjusted-tmle-metadata, eval = FALSE}
+surv_metadata_adj <-
+  adjrct::survrct(
+    outcome.formula = Surv(days_on_study, died_on_study) ~ tx +
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets + ich_location +
+      ich_s_volume + ivh_s_volume + gcs_category,
+    trt.formula =
+      tx ~
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets + ich_location +
+      ich_s_volume + ivh_s_volume + gcs_category,
+    data = sim_miii
+  )
+```
+
+
+```{r adjusted-tmle-survival-rmst-adjrct, eval = FALSE}
+adjrct::rmst(
+  metadata = surv_metadata_adj,
+  horizon = 90
+)
+```
+
+
+```{r adjusted-tmle-survival-probability-adjrct, eval = FALSE}
+adjrct::survprob(
+  metadata = surv_metadata_adj,
+  horizon = 90
+)
+```
+
+
+
+
+## TMLE: RMST & Survival Probability {.columns-2 .smaller}
+
+```{r echo = FALSE}
+rmst_tmle_adj <-
+  adjrct::rmst(
+    metadata = surv_metadata_adj,
+    horizon = 90
+  )
+
+rmst_metadata_adj_table <-
+  with(
+    rmst_tmle_adj$estimates[[1]],
+
+    bind_rows(
+      data.frame(
+        Arm = "Treatment",
+        Estimate = arm1,
+        SE = arm1.std.error,
+        LCL = arm1.conf.low,
+        UCL = arm1.conf.high
+      ),
+
+      data.frame(
+        Arm = "Control",
+        Estimate = arm0,
+        SE = arm0.std.error,
+        LCL = arm0.conf.low,
+        UCL = arm0.conf.high
+      ),
+      data.frame(
+        Arm = "Treatment - Control",
+        Estimate = theta,
+        SE = std.error,
+        LCL = theta.conf.low,
+        UCL = theta.conf.high
+      )
+    )
+  )
+
+kable(
+  x = rmst_metadata_adj_table,
+  caption = "TMLE adjusted estimates of Restricted Mean Survival Time.",
+  digits = 2
+)
+
+kable(
+  x = rmst_metadata_unadj_table,
+  caption = "TMLE **unadjusted** estimates of Restricted Mean Survival Time.",
+  digits = 2
+)
+
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r echo = FALSE, warning = FALSE}
+survival_probability_adj <-
+  adjrct::survprob(
+    metadata = surv_metadata_adj,
+    horizon = 90
+  )
+
+survival_probability_adj_table <-
+  with(
+    survival_probability_adj$estimates[[1]],
+
+    bind_rows(
+      data.frame(
+        Arm = "Treatment",
+        Estimate = arm1,
+        SE = arm1.std.error,
+        LCL = arm1.conf.low,
+        UCL = arm1.conf.high
+      ),
+
+      data.frame(
+        Arm = "Control",
+        Estimate = arm0,
+        SE = arm0.std.error,
+        LCL = arm0.conf.low,
+        UCL = arm0.conf.high
+      ),
+      data.frame(
+        Arm = "Treatment - Control",
+        Estimate = theta,
+        SE = std.error,
+        LCL = theta.conf.low,
+        UCL = theta.conf.high
+      )
+    )
+  )
+
+kable(
+  x = survival_probability_adj_table,
+  caption = "TMLE adjusted estimates of 90-day Survival.",
+  digits = 2
+)
+
+kable(
+  x = survival_probability_unadj_table,
+  caption = "TMLE **unadjusted** estimates of 90-day Survival.",
+  digits = 2
+)
+```
+
+
+
+
+## Summary:
+
+  - Limitations of Logrank & Cox:
+    - PH Assumptions; Relative; Dependence on censoring
+  - Survival Probability & RMST:
+    - Absolute: specific reference to time; Sidestep PH assumption
+    - Doubly robust estimators
+    - Sample Size Calculations
+  - Tutorials: Continuous, Binary, Ordinal, Time-to-Event
+    - Example Data: Stroke, Substance Abuse - More forthcoming
+    - Fixed Sample Size; Group Sequential; Information Adaptive
+
+
+
+
+## References {.smaller}
